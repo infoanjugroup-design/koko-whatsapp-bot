@@ -88,7 +88,7 @@ app.post('/link', async (req, res) => {
   }
 
   const phone = (req.body.phone || '').replace(/[^0-9]/g, '');
-  if (!phone || phone.length < 10) {
+  if (!phone || phone.length < 12) {
     return res.send('<h2>❌ Invalid number! Country code required (e.g. 919876543210).</h2><a href="/link">Back</a>');
   }
 
