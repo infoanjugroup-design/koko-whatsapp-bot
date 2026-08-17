@@ -176,7 +176,7 @@ async function startBot() {
         if (statusCode === 440 || statusCode === 401) {
           console.error('❌ Session out of sync (440/401). Wiping session from Supabase...');
           await supabase.from('sessions').delete().eq('session_id', SESSION_ID);
-          
+
           // Exit process so Render restarts with clean slate (Zero crash loops)
           setTimeout(() => process.exit(1), 1500);
           return;
@@ -197,14 +197,21 @@ async function startBot() {
       }
     });
 
+    // ---------------------------------------------------------------------
+    // Inbound messages ONLY. This handler never fires on its own — it only
+    // runs when Baileys reports a real incoming WhatsApp message
+    // (type === 'notify'), and it only ever calls sock.sendMessage(jid, ...)
+    // as a direct reply to that same jid. There is no timer, cron, or
+    // broadcast anywhere in this file — the bot never messages anyone first.
+    // ---------------------------------------------------------------------
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
 
       for (const msg of messages) {
+        const jid = msg?.key?.remoteJid;
+
         try {
           if (!msg.message || msg.key.fromMe) continue;
-
-          const jid = msg.key.remoteJid;
           if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
 
           const text =
@@ -223,9 +230,12 @@ async function startBot() {
             await sock.sendMessage(jid, { text: reply });
           }
         } catch (err) {
+          // handleMessage() already catches its own errors and returns a
+          // friendly string, so reaching here means something failed
+          // outside it (e.g. sock.sendMessage itself). Still try once to
+          // tell the user, so a coin claim never looks like it vanished.
           console.error('Error handling message:', err);
           try {
-            const jid = msg.key.remoteJid;
             if (jid) {
               await sock.sendMessage(jid, {
                 text: '⚠️ Kuch technical dikkat aa gayi hai, thodi der baad dobara try karo.',
