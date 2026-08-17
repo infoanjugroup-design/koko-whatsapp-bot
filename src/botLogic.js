@@ -10,6 +10,12 @@ import supabase from './supabase.js';
 // get_or_create_wallet / coin_transactions.type additions from 0010 — so
 // there is exactly ONE coin balance per phone number, no matter which
 // WhatsApp integration answers a given message.
+//
+// IMPORTANT: this module NEVER sends a message on its own initiative. It
+// only ever returns a string reply in response to an inbound message that
+// server.js hands it — nothing here schedules, broadcasts, or pushes a
+// message out of band. Every code path below returns a string; nothing
+// throws past handleMessage().
 // ---------------------------------------------------------------------------
 
 const SIGNUP_BONUS = 50;
@@ -421,8 +427,14 @@ async function handleMessageInternal(phone, rawText, profileName = null) {
 // ---------------------------------------------------------------------------
 // Public entry point — wraps handleMessageInternal in a catch-all so an
 // unexpected DB/RPC error (missing function, bad param, RLS block, etc.)
-// still always sends the user SOME reply instead of silently failing.
+// still ALWAYS sends the user some reply instead of silently failing —
+// this is what was broken: a thrown error here used to reach server.js's
+// catch block, which only logged it and sent nothing back to WhatsApp.
 // The real error is logged here for debugging in Render logs.
+//
+// This function only ever returns a reply string for the inbound message
+// it was called with — it never calls sock.sendMessage or any send API
+// itself, and never initiates contact with anyone on its own.
 // ---------------------------------------------------------------------------
 export async function handleMessage(phone, rawText, profileName = null) {
   try {
