@@ -359,7 +359,7 @@ async function handleQuizAnswer(wallet, phone, rawText) {
 // ---------------------------------------------------------------------------
 // Main Dispatcher
 // ---------------------------------------------------------------------------
-export async function handleMessage(phone, rawText, profileName = null) {
+async function handleMessageInternal(phone, rawText, profileName = null) {
   const text = (rawText || '').trim();
   const lower = text.toLowerCase();
   const upper = text.toUpperCase();
@@ -415,5 +415,20 @@ export async function handleMessage(phone, rawText, profileName = null) {
       return handlePayout(phone, text);
     default:
       return `🤔 Sorry, I didn't understand that.\n\n${helpText()}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point — wraps handleMessageInternal in a catch-all so an
+// unexpected DB/RPC error (missing function, bad param, RLS block, etc.)
+// still always sends the user SOME reply instead of silently failing.
+// The real error is logged here for debugging in Render logs.
+// ---------------------------------------------------------------------------
+export async function handleMessage(phone, rawText, profileName = null) {
+  try {
+    return await handleMessageInternal(phone, rawText, profileName);
+  } catch (err) {
+    console.error('❌ handleMessage fatal error:', err);
+    return "⚠️ Kuch technical dikkat aa gayi hai, thodi der baad dobara try karo. Agar dikkat rahe toh 'hi' bhejkar dekho.";
   }
 }
