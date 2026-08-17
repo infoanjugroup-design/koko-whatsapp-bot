@@ -88,7 +88,7 @@ app.post('/link', async (req, res) => {
   }
 
   const phone = (req.body.phone || '').replace(/[^0-9]/g, '');
-  if (!phone || phone.length < 12) {
+  if (!phone || phone.length < 10) {
     return res.send('<h2>❌ Invalid number! Country code required (e.g. 919876543210).</h2><a href="/link">Back</a>');
   }
 
@@ -224,6 +224,16 @@ async function startBot() {
           }
         } catch (err) {
           console.error('Error handling message:', err);
+          try {
+            const jid = msg.key.remoteJid;
+            if (jid) {
+              await sock.sendMessage(jid, {
+                text: '⚠️ Kuch technical dikkat aa gayi hai, thodi der baad dobara try karo.',
+              });
+            }
+          } catch (sendErr) {
+            console.error('Failed to send fallback error reply:', sendErr);
+          }
         }
       }
     });
