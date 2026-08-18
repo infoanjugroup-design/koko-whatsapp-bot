@@ -5,8 +5,9 @@
 // WHAT THIS IS: a long-running Node process using Baileys
 // (@whiskeysockets/baileys) to speak WhatsApp's multi-device protocol
 // directly over a WebSocket — no phone notification-reading involved,
-// no Puppeteer/Chromium. Link it once by scanning a QR code (this
-// process serves that QR at GET /qr — see below), and it then stays
+// no Puppeteer/Chromium. Link it once — either by scanning a QR code
+// (GET /qr) or, if PAIRING_PHONE_NUMBER is set, by entering an 8-character
+// pairing code on the phone instead (GET /pair) — and it then stays
 // connected on its own, same as WhatsApp Web/Desktop would.
 //
 // WHAT THIS IS NOT: this does not replace app/api/whatsapp/auto-reply or
@@ -23,10 +24,18 @@
 // (free Render web services have no persistent disk, so a redeploy wipes
 // ./auth_session and you'll need to re-scan the QR).
 //
-// Env vars required:
-//   AUTO_REPLY_ENDPOINT_URL   e.g. https://kokofoods.in/api/whatsapp/auto-reply
+// Env vars:
+//   AUTO_REPLY_ENDPOINT_URL   required. e.g. https://kokofoods.in/api/whatsapp/auto-reply
 //   AUTO_REPLY_SHARED_SECRET  must match the value set on the main site
-//   QR_ACCESS_KEY             (optional) protects GET /qr with ?key=...
+//   QR_ACCESS_KEY             (optional) protects GET /qr and /pair with ?key=...
+//   PAIRING_PHONE_NUMBER      (optional) the WhatsApp number to link, digits only
+//                             with country code, e.g. 917067546744 — no +, no
+//                             spaces. Set this to link by pairing code instead
+//                             of QR: open GET /pair to get the code, then on
+//                             the phone go to WhatsApp → Linked Devices →
+//                             Link a Device → "Link with phone number instead"
+//                             and type the code shown. Leave unset to use the
+//                             QR flow (GET /qr) as before.
 //   PORT                      Render sets this automatically
 
 const express = require("express");
@@ -44,6 +53,9 @@ const AUTO_REPLY_ENDPOINT_URL = process.env.AUTO_REPLY_ENDPOINT_URL;
 const AUTO_REPLY_SHARED_SECRET = process.env.AUTO_REPLY_SHARED_SECRET;
 const QR_ACCESS_KEY = process.env.QR_ACCESS_KEY;
 const AUTH_DIR = process.env.AUTH_DIR || "./auth_session";
+const PAIRING_PHONE_NUMBER = process.env.PAIRING_PHONE_NUMBER
+  ? process.env.PAIRING_PHONE_NUMBER.replace(/[^\d]/g, "")
+  : null;
 
 if (!AUTO_REPLY_ENDPOINT_URL) {
   console.error("FATAL: AUTO_REPLY_ENDPOINT_URL is not set. Refusing to start.");
@@ -54,7 +66,8 @@ const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 
 // ---- In-memory state shared between the WhatsApp socket and the HTTP server ----
 let latestQrString = null; // set whenever WhatsApp issues a fresh QR to scan
-let connectionStatus = "starting"; // "starting" | "qr_pending" | "connected" | "disconnected"
+let latestPairingCode = null; // set once requestPairingCode() resolves, if using that flow
+let connectionStatus = "starting"; // "starting" | "qr_pending" | "pairing_pending" | "connected" | "disconnected"
 
 // ----------------------------------------------------------------------------
 // Tiny HTTP server — Render Web Services need something listening on PORT.
@@ -92,8 +105,36 @@ app.get("/qr", async (req, res) => {
   );
 });
 
+app.get("/pair", (req, res) => {
+  if (QR_ACCESS_KEY && req.query.key !== QR_ACCESS_KEY) {
+    return res.status(401).send("Unauthorized");
+  }
+  if (!PAIRING_PHONE_NUMBER) {
+    return res
+      .status(400)
+      .send("PAIRING_PHONE_NUMBER is not set — this service is using the QR flow instead. See /qr.");
+  }
+  if (connectionStatus === "connected") {
+    return res.send("<h2>Already linked and connected. Nothing to pair.</h2>");
+  }
+  if (!latestPairingCode) {
+    return res.send("<h2>No pairing code yet — still starting up, refresh in a few seconds.</h2>");
+  }
+  res.send(
+    `<html><body style="text-align:center;font-family:sans-serif">
+       <h2>On your phone: WhatsApp → Linked Devices → Link a Device →<br/>"Link with phone number instead"</h2>
+       <p>Enter this code:</p>
+       <div style="font-size:2.5em;letter-spacing:0.15em;font-weight:bold">${latestPairingCode}</div>
+       <p>This page auto-refreshes every 5s until linked.</p>
+       <script>setTimeout(()=>location.reload(), 5000)</script>
+     </body></html>`
+  );
+});
+
 app.listen(PORT, () => {
-  logger.info(`HTTP server listening on ${PORT} (QR at /qr, health at /health)`);
+  logger.info(
+    `HTTP server listening on ${PORT} (${PAIRING_PHONE_NUMBER ? "pairing code at /pair" : "QR at /qr"}, health at /health)`
+  );
 });
 
 // ----------------------------------------------------------------------------
@@ -131,15 +172,34 @@ async function startBot() {
     version,
     auth: state,
     logger: pino({ level: "silent" }), // Baileys' own internal logging — separate from ours above
-    printQRInTerminal: false, // we serve /qr instead
+    printQRInTerminal: false, // we serve /qr (or /pair) instead
   });
+
+  // Pairing-code flow: request it once, right after the socket is created,
+  // instead of waiting for the automatic QR. Only meaningful the first time
+  // (before this device is registered) — on reconnects with a saved session
+  // creds.registered is already true, so this is skipped.
+  if (PAIRING_PHONE_NUMBER && !sock.authState.creds.registered) {
+    try {
+      const code = await sock.requestPairingCode(PAIRING_PHONE_NUMBER);
+      latestPairingCode = code;
+      connectionStatus = "pairing_pending";
+      logger.info(`Pairing code issued: ${code} — open /pair on this service's URL, or use it directly.`);
+    } catch (err) {
+      logger.error(err, "Failed to request pairing code — check PAIRING_PHONE_NUMBER is correct.");
+    }
+  }
 
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && !PAIRING_PHONE_NUMBER) {
+      // Only track/serve the QR when we're actually using the QR flow —
+      // if pairing code is configured, WhatsApp still emits a qr event in
+      // parallel, but we ignore it so /qr and /pair don't show conflicting
+      // states.
       latestQrString = qr;
       connectionStatus = "qr_pending";
       logger.info("New QR issued — open /qr on this service's URL to scan it.");
@@ -148,6 +208,7 @@ async function startBot() {
     if (connection === "open") {
       connectionStatus = "connected";
       latestQrString = null;
+      latestPairingCode = null;
       logger.info("WhatsApp linked device connected.");
     }
 
